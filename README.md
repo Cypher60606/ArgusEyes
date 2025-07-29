@@ -12,7 +12,7 @@ Antes de instalar ArgusEye, asegúrate de tener lo siguiente:
 
 🧰 Instalación paso a paso
 # 1️⃣ Clona el repositorio
-git clone https://github.com/tuusuario/arguseye.git
+git clone https://github.com/Cypher60606/ArgusEyes.git
 
 # 2️⃣ Entra al directorio
 cd arguseye
