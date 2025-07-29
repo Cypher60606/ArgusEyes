@@ -41,7 +41,7 @@ Una vez iniciado, podrás elegir entre las siguientes opciones interactivas:
 - Detección de dispositivos IoT en red
 - Activación del asistente de voz para ejecutar comandos por voz
 
-🗣️ Activación del Asistente de Voz
+🗣️ Activación del Asistente de Voz (AUN EN PRODUCCIÓN)
 Para usar el asistente de voz integrado:
 - Verifica que tu sistema tenga entrada de micrófono habilitada.
 - Ejecuta el comando:
