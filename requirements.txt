@@ -1,0 +1,9 @@
+python-nmap==0.7.1
+pyttsx3==2.90
+requests==2.31.0
+python-whois==0.8.0
+dnspython==2.4.2
+pyOpenSSL==23.2.0
+cryptography==41.0.3
+concurrent-log-handler==0.9.24
+beautifulsoup4==4.12.2

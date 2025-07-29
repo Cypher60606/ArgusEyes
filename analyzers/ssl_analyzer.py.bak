@@ -1,0 +1,837 @@
+#!/usr/bin/env python3
+
+import subprocess
+import re
+import json
+import os
+import sys
+import socket
+import datetime
+import ssl
+import OpenSSL
+from datetime import datetime
+
+
+def analyze_ssl_certificate(target_ip, port, timeout=10):
+    """
+    Analiza el certificado SSL/TLS de un servicio
+
+    Args:
+        target_ip (str): La dirección IP del objetivo
+        port (int): El puerto del servicio
+        timeout (int): Tiempo máximo de espera para la conexión en segundos
+
+    Returns:
+        dict: Información del certificado SSL/TLS
+    """
+    try:
+        print(f"\n[*] Analizando certificado SSL/TLS en {target_ip}:{port}...")
+
+        # Crear contexto SSL
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        # No verificar el certificado para poder analizar incluso los inválidos
+        context.verify_mode = ssl.CERT_NONE
+
+        # Establecer conexión SSL
+        with socket.create_connection((target_ip, port), timeout=timeout) as sock:
+            with context.wrap_socket(sock, server_hostname=target_ip) as ssock:
+                # Obtener certificado en formato binario
+                cert_bin = ssock.getpeercert(binary_form=True)
+
+                # Convertir a formato OpenSSL para análisis detallado
+                x509 = OpenSSL.crypto.load_certificate(
+                    OpenSSL.crypto.FILETYPE_ASN1, cert_bin)
+
+                # Extraer información del certificado
+                cert_info = {
+                    "subject": dict(x509.get_subject().get_components()),
+                    "issuer": dict(x509.get_issuer().get_components()),
+                    "version": x509.get_version(),
+                    "serial_number": x509.get_serial_number(),
+                    "not_before": x509.get_notBefore().decode('ascii'),
+                    "not_after": x509.get_notAfter().decode('ascii'),
+                    "has_expired": x509.has_expired(),
+                    "signature_algorithm": x509.get_signature_algorithm().decode('ascii'),
+                    "extensions": get_certificate_extensions(x509),
+                    "public_key_bits": x509.get_pubkey().bits(),
+                    "public_key_type": get_public_key_type(x509.get_pubkey().type())
+                }
+
+                # Convertir bytes a strings en subject e issuer
+                for key in ['subject', 'issuer']:
+                    cert_info[key] = {k.decode('utf-8'): v.decode('utf-8')
+                                      for k, v in cert_info[key].items()}
+
+                # Verificar fecha de expiración
+                not_after = datetime.strptime(
+                    cert_info['not_after'], '%Y%m%d%H%M%SZ')
+                now = datetime.now()
+                days_to_expire = (not_after - now).days
+                cert_info['days_to_expire'] = days_to_expire
+
+                # Obtener información de la conexión SSL
+                cert_info['protocol_version'] = ssock.version()
+                cert_info['cipher'] = ssock.cipher()
+
+                return cert_info
+
+    except ssl.SSLError as e:
+        print(f"\n[!] Error SSL: {e}")
+        return {"error": f"Error SSL: {e}"}
+    except socket.error as e:
+        print(f"\n[!] Error de conexión: {e}")
+        return {"error": f"Error de conexión: {e}"}
+    except Exception as e:
+        print(f"\n[!] Error al analizar certificado: {e}")
+        return {"error": f"Error al analizar certificado: {e}"}
+
+
+def get_certificate_extensions(x509):
+    """
+    Extrae las extensiones de un certificado X509
+
+    Args:
+        x509: Objeto certificado OpenSSL
+
+    Returns:
+        dict: Diccionario con las extensiones del certificado
+    """
+    extensions = {}
+    for i in range(x509.get_extension_count()):
+        ext = x509.get_extension(i)
+        ext_name = ext.get_short_name().decode('utf-8')
+        try:
+            ext_value = str(ext)
+            extensions[ext_name] = ext_value
+        except Exception as e:
+            extensions[ext_name] = "<no se puede decodificar>"
+            print(f"[!] Error al decodificar extensión {ext_name}: {e}")
+    return extensions
+
+
+def get_public_key_type(key_type):
+    """
+    Convierte el tipo de clave pública a un formato legible
+
+    Args:
+        key_type: Tipo de clave numérico de OpenSSL
+
+    Returns:
+        str: Nombre del tipo de clave
+    """
+    key_types = {
+        OpenSSL.crypto.TYPE_RSA: "RSA",
+        OpenSSL.crypto.TYPE_DSA: "DSA",
+        OpenSSL.crypto.TYPE_EC: "ECC",
+        6: "ED25519",  # OpenSSL.crypto.TYPE_ED25519 en versiones más recientes
+        7: "ED448"     # OpenSSL.crypto.TYPE_ED448 en versiones más recientes
+    }
+    return key_types.get(key_type, f"Desconocido ({key_type})")
+
+
+def analyze_ssl_protocols(target_ip, port, timeout=5):
+    """
+    Analiza los protocolos SSL/TLS soportados por un servicio
+
+    Args:
+        target_ip (str): La dirección IP del objetivo
+        port (int): El puerto del servicio
+        timeout (int): Tiempo máximo de espera para cada prueba en segundos
+
+    Returns:
+        dict: Información sobre los protocolos soportados
+    """
+    try:
+        print(f"\n[*] Analizando protocolos SSL/TLS en {target_ip}:{port}...")
+
+        # Lista de protocolos a probar
+        protocols = {
+            "SSLv2": ssl.PROTOCOL_SSLv23,  # Prueba de compatibilidad con SSLv2
+            "SSLv3": ssl.PROTOCOL_SSLv23,  # Prueba de compatibilidad con SSLv3
+            "TLSv1.0": ssl.PROTOCOL_TLSv1,
+            "TLSv1.1": ssl.PROTOCOL_TLSv1_1,
+            "TLSv1.2": ssl.PROTOCOL_TLSv1_2,
+            "TLSv1.3": ssl.PROTOCOL_TLS   # TLS 1.3 en versiones recientes de Python
+        }
+
+        results = {}
+
+        for protocol_name, protocol in protocols.items():
+            try:
+                context = ssl.SSLContext(protocol)
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+
+                # Para SSLv2 y SSLv3, necesitamos configuraciones específicas
+                if protocol_name == "SSLv2":
+                    context.options &= ~ssl.OP_NO_SSLv2
+                elif protocol_name == "SSLv3":
+                    context.options &= ~ssl.OP_NO_SSLv3
+
+                with socket.create_connection((target_ip, port), timeout=timeout) as sock:
+                    with context.wrap_socket(sock, server_hostname=target_ip) as ssock:
+                        # Si llegamos aquí, el protocolo es soportado
+                        cipher = ssock.cipher()
+                        results[protocol_name] = {
+                            "supported": True,
+                            "cipher": cipher[0],
+                            "bits": cipher[1],
+                            "version": ssock.version()
+                        }
+            except ssl.SSLError as e:
+                # Si el error indica que el protocolo no es soportado
+                if "wrong version" in str(e) or "protocol" in str(e).lower():
+                    results[protocol_name] = {
+                        "supported": False, "error": str(e)}
+                else:
+                    results[protocol_name] = {
+                        "supported": False, "error": str(e)}
+            except socket.error as e:
+                results[protocol_name] = {
+                    "supported": False, "error": f"Error de conexión: {e}"}
+            except Exception as e:
+                results[protocol_name] = {"supported": False, "error": str(e)}
+
+        return results
+
+    except Exception as e:
+        print(f"\n[!] Error al analizar protocolos SSL/TLS: {e}")
+        return {"error": f"Error al analizar protocolos SSL/TLS: {e}"}
+
+
+def analyze_ssl_ciphers(target_ip, port, timeout=5):
+    """
+    Analiza los cifrados SSL/TLS soportados por un servicio
+
+    Args:
+        target_ip (str): La dirección IP del objetivo
+        port (int): El puerto del servicio
+        timeout (int): Tiempo máximo de espera para cada prueba en segundos
+
+    Returns:
+        dict: Información sobre los cifrados soportados
+    """
+    try:
+        print(f"\n[*] Analizando cifrados SSL/TLS en {target_ip}:{port}...")
+
+        # Usar directamente una lista de cifrados comunes en lugar de ejecutar el comando openssl
+        # Esto evita problemas de compatibilidad con Windows donde openssl puede no estar disponible
+        cipher_list = [
+            {"name": "ECDHE-RSA-AES256-GCM-SHA384",
+                "protocol": "TLSv1.2", "key_exchange": "ECDHE"},
+            {"name": "ECDHE-RSA-AES128-GCM-SHA256",
+                "protocol": "TLSv1.2", "key_exchange": "ECDHE"},
+            {"name": "DHE-RSA-AES256-GCM-SHA384",
+                "protocol": "TLSv1.2", "key_exchange": "DHE"},
+            {"name": "DHE-RSA-AES128-GCM-SHA256",
+                "protocol": "TLSv1.2", "key_exchange": "DHE"},
+            {"name": "ECDHE-RSA-AES256-SHA384",
+                "protocol": "TLSv1.2", "key_exchange": "ECDHE"},
+            {"name": "ECDHE-RSA-AES128-SHA256",
+                "protocol": "TLSv1.2", "key_exchange": "ECDHE"},
+            {"name": "AES256-GCM-SHA384", "protocol": "TLSv1.2", "key_exchange": "RSA"},
+            {"name": "AES128-GCM-SHA256", "protocol": "TLSv1.2", "key_exchange": "RSA"},
+            {"name": "AES256-SHA256", "protocol": "TLSv1.2", "key_exchange": "RSA"},
+            {"name": "AES128-SHA256", "protocol": "TLSv1.2", "key_exchange": "RSA"},
+            {"name": "DES-CBC3-SHA", "protocol": "SSLv3", "key_exchange": "RSA"},
+            {"name": "RC4-SHA", "protocol": "SSLv3", "key_exchange": "RSA"},
+            {"name": "NULL-SHA", "protocol": "SSLv3", "key_exchange": "RSA"}
+        ]
+
+        # Probar cada cifrado con el servidor
+        results = {}
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+
+        # Probar algunos cifrados comunes (para no hacer la prueba demasiado larga)
+        common_ciphers = [
+            "ECDHE-RSA-AES256-GCM-SHA384",
+            "ECDHE-RSA-AES128-GCM-SHA256",
+            "DHE-RSA-AES256-GCM-SHA384",
+            "DHE-RSA-AES128-GCM-SHA256",
+            "ECDHE-RSA-AES256-SHA384",
+            "ECDHE-RSA-AES128-SHA256",
+            "AES256-GCM-SHA384",
+            "AES128-GCM-SHA256",
+            "AES256-SHA256",
+            "AES128-SHA256",
+            "DES-CBC3-SHA",  # Triple DES (débil)
+            "RC4-SHA",       # RC4 (débil)
+            "NULL-SHA"       # Sin cifrado (muy débil)
+        ]
+
+        for cipher in common_ciphers:
+            try:
+                # Configurar contexto para usar solo este cifrado
+                context.set_ciphers(cipher)
+
+                with socket.create_connection((target_ip, port), timeout=timeout) as sock:
+                    try:
+                        with context.wrap_socket(sock, server_hostname=target_ip) as ssock:
+                            # Si llegamos aquí, el cifrado es soportado
+                            actual_cipher = ssock.cipher()
+                            results[cipher] = {
+                                "supported": True,
+                                "bits": actual_cipher[1],
+                                "version": ssock.version()
+                            }
+                    except ssl.SSLError as e:
+                        results[cipher] = {"supported": False, "error": str(e)}
+            except Exception as e:
+                results[cipher] = {"supported": False, "error": str(e)}
+
+        return results
+
+    except Exception as e:
+        print(f"\n[!] Error al analizar cifrados SSL/TLS: {e}")
+        return {"error": f"Error al analizar cifrados SSL/TLS: {e}"}
+
+
+def check_ssl_vulnerabilities(target_ip, port):
+    """
+    Verifica vulnerabilidades conocidas en la implementación SSL/TLS
+
+    Args:
+        target_ip (str): La dirección IP del objetivo
+        port (int): El puerto del servicio
+
+    Returns:
+        dict: Información sobre vulnerabilidades detectadas
+    """
+    try:
+        print(
+            f"\n[*] Verificando vulnerabilidades SSL/TLS en {target_ip}:{port}...")
+
+        vulnerabilities = {}
+
+        # Verificar Heartbleed (CVE-2014-0160)
+        try:
+            command = f"nmap -p {port} --script ssl-heartbleed {target_ip}"
+            process = subprocess.Popen(
+                command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate()
+            output = stdout.decode()
+
+            if "VULNERABLE" in output:
+                vulnerabilities["heartbleed"] = {
+                    "vulnerable": True,
+                    "description": "Vulnerable a Heartbleed (CVE-2014-0160)",
+                    "severity": "Alta",
+                    "details": "Esta vulnerabilidad permite a un atacante leer memoria del servidor, potencialmente exponiendo claves privadas y datos sensibles."
+                }
+            else:
+                vulnerabilities["heartbleed"] = {"vulnerable": False}
+        except Exception as e:
+            vulnerabilities["heartbleed"] = {"error": str(e)}
+
+        # Verificar POODLE (CVE-2014-3566)
+        try:
+            command = f"nmap -p {port} --script ssl-poodle {target_ip}"
+            process = subprocess.Popen(
+                command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate()
+            output = stdout.decode()
+
+            if "VULNERABLE" in output:
+                vulnerabilities["poodle"] = {
+                    "vulnerable": True,
+                    "description": "Vulnerable a POODLE (CVE-2014-3566)",
+                    "severity": "Media",
+                    "details": "Esta vulnerabilidad permite a un atacante descifrar datos transmitidos con SSLv3 mediante un ataque de tipo padding oracle."
+                }
+            else:
+                vulnerabilities["poodle"] = {"vulnerable": False}
+        except Exception as e:
+            vulnerabilities["poodle"] = {"error": str(e)}
+
+        # Verificar FREAK (CVE-2015-0204)
+        try:
+            command = f"nmap -p {port} --script ssl-enum-ciphers {target_ip}"
+            process = subprocess.Popen(
+                command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate()
+            output = stdout.decode()
+
+            if "EXP" in output or "EXPORT" in output:
+                vulnerabilities["freak"] = {
+                    "vulnerable": True,
+                    "description": "Vulnerable a FREAK (CVE-2015-0204)",
+                    "severity": "Media",
+                    "details": "Esta vulnerabilidad permite a un atacante forzar el uso de cifrados de exportación débiles, facilitando el descifrado de la comunicación."
+                }
+            else:
+                vulnerabilities["freak"] = {"vulnerable": False}
+        except Exception as e:
+            vulnerabilities["freak"] = {"error": str(e)}
+
+        # Verificar DROWN (CVE-2016-0800)
+        try:
+            command = f"nmap -p {port} --script ssl-drown {target_ip}"
+            process = subprocess.Popen(
+                command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate()
+            output = stdout.decode()
+
+            if "VULNERABLE" in output:
+                vulnerabilities["drown"] = {
+                    "vulnerable": True,
+                    "description": "Vulnerable a DROWN (CVE-2016-0800)",
+                    "severity": "Alta",
+                    "details": "Esta vulnerabilidad permite a un atacante descifrar conexiones TLS mediante un ataque contra SSLv2."
+                }
+            else:
+                vulnerabilities["drown"] = {"vulnerable": False}
+        except Exception as e:
+            vulnerabilities["drown"] = {"error": str(e)}
+
+        return vulnerabilities
+
+    except Exception as e:
+        print(f"\n[!] Error al verificar vulnerabilidades SSL/TLS: {e}")
+        return {"error": f"Error al verificar vulnerabilidades SSL/TLS: {e}"}
+
+
+def analyze_ssl_configuration(target_ip, port):
+    """
+    Analiza la configuración SSL/TLS de un servicio y proporciona recomendaciones
+
+    Args:
+        target_ip (str): La dirección IP del objetivo
+        port (int): El puerto del servicio
+
+    Returns:
+        dict: Análisis de la configuración y recomendaciones
+    """
+    try:
+        print(
+            f"\n[*] Analizando configuración SSL/TLS en {target_ip}:{port}...")
+
+        # Recopilar información de certificado, protocolos y cifrados
+        cert_info = analyze_ssl_certificate(target_ip, port)
+        protocol_info = analyze_ssl_protocols(target_ip, port)
+        cipher_info = analyze_ssl_ciphers(target_ip, port)
+        vulnerability_info = check_ssl_vulnerabilities(target_ip, port)
+
+        # Analizar la configuración y generar recomendaciones
+        analysis = {
+            "certificate": {},
+            "protocols": {},
+            "ciphers": {},
+            "vulnerabilities": {},
+            "overall_rating": "",
+            "recommendations": []
+        }
+
+        # Analizar certificado
+        if "error" not in cert_info:
+            # Verificar fecha de expiración
+            if cert_info.get("has_expired", False):
+                analysis["certificate"]["expiration"] = {
+                    "status": "critical",
+                    "message": "El certificado ha expirado"
+                }
+                analysis["recommendations"].append(
+                    "Renovar el certificado SSL/TLS expirado")
+            elif cert_info.get("days_to_expire", 0) < 30:
+                analysis["certificate"]["expiration"] = {
+                    "status": "warning",
+                    "message": f"El certificado expirará pronto (en {cert_info['days_to_expire']} días)"
+                }
+                analysis["recommendations"].append(
+                    f"Planificar la renovación del certificado que expira en {cert_info['days_to_expire']} días")
+            else:
+                analysis["certificate"]["expiration"] = {
+                    "status": "good",
+                    "message": f"El certificado es válido por {cert_info['days_to_expire']} días más"
+                }
+
+            # Verificar algoritmo de firma
+            sig_alg = cert_info.get("signature_algorithm", "").lower()
+            if "sha1" in sig_alg or "md5" in sig_alg:
+                analysis["certificate"]["signature_algorithm"] = {
+                    "status": "critical",
+                    "message": f"El certificado utiliza un algoritmo de firma débil: {sig_alg}"
+                }
+                analysis["recommendations"].append(
+                    f"Reemplazar el certificado que utiliza el algoritmo de firma débil {sig_alg}")
+            elif "sha256" in sig_alg or "sha384" in sig_alg or "sha512" in sig_alg:
+                analysis["certificate"]["signature_algorithm"] = {
+                    "status": "good",
+                    "message": f"El certificado utiliza un algoritmo de firma fuerte: {sig_alg}"
+                }
+
+            # Verificar tamaño de clave
+            key_bits = cert_info.get("public_key_bits", 0)
+            key_type = cert_info.get("public_key_type", "")
+
+            if key_type == "RSA" and key_bits < 2048:
+                analysis["certificate"]["key_strength"] = {
+                    "status": "critical",
+                    "message": f"La clave {key_type} es demasiado débil ({key_bits} bits)"
+                }
+                analysis["recommendations"].append(
+                    f"Reemplazar el certificado con una clave {key_type} de al menos 2048 bits")
+            elif key_type == "ECC" and key_bits < 256:
+                analysis["certificate"]["key_strength"] = {
+                    "status": "critical",
+                    "message": f"La clave {key_type} es demasiado débil ({key_bits} bits)"
+                }
+                analysis["recommendations"].append(
+                    f"Reemplazar el certificado con una clave {key_type} de al menos 256 bits")
+            else:
+                analysis["certificate"]["key_strength"] = {
+                    "status": "good",
+                    "message": f"La clave {key_type} tiene un tamaño adecuado ({key_bits} bits)"
+                }
+
+        # Analizar protocolos
+        if "error" not in protocol_info:
+            weak_protocols = []
+
+            # Verificar protocolos obsoletos
+            if protocol_info.get("SSLv2", {}).get("supported", False):
+                weak_protocols.append("SSLv2")
+                analysis["protocols"]["SSLv2"] = {
+                    "status": "critical",
+                    "message": "SSLv2 está habilitado (muy inseguro)"
+                }
+
+            if protocol_info.get("SSLv3", {}).get("supported", False):
+                weak_protocols.append("SSLv3")
+                analysis["protocols"]["SSLv3"] = {
+                    "status": "critical",
+                    "message": "SSLv3 está habilitado (inseguro, vulnerable a POODLE)"
+                }
+
+            if protocol_info.get("TLSv1.0", {}).get("supported", False):
+                weak_protocols.append("TLSv1.0")
+                analysis["protocols"]["TLSv1.0"] = {
+                    "status": "warning",
+                    "message": "TLSv1.0 está habilitado (obsoleto)"
+                }
+
+            if protocol_info.get("TLSv1.1", {}).get("supported", False):
+                analysis["protocols"]["TLSv1.1"] = {
+                    "status": "warning",
+                    "message": "TLSv1.1 está habilitado (obsoleto)"
+                }
+
+            if weak_protocols:
+                analysis["recommendations"].append(
+                    f"Deshabilitar los protocolos obsoletos: {', '.join(weak_protocols)}")
+
+            # Verificar protocolos modernos
+            modern_protocols = []
+            if protocol_info.get("TLSv1.2", {}).get("supported", False):
+                modern_protocols.append("TLSv1.2")
+                analysis["protocols"]["TLSv1.2"] = {
+                    "status": "good",
+                    "message": "TLSv1.2 está habilitado (recomendado)"
+                }
+
+            if protocol_info.get("TLSv1.3", {}).get("supported", False):
+                modern_protocols.append("TLSv1.3")
+                analysis["protocols"]["TLSv1.3"] = {
+                    "status": "excellent",
+                    "message": "TLSv1.3 está habilitado (óptimo)"
+                }
+
+            if not modern_protocols:
+                analysis["recommendations"].append(
+                    "Habilitar TLSv1.2 y TLSv1.3")
+
+        # Analizar cifrados
+        if "error" not in cipher_info:
+            weak_ciphers = []
+
+            # Verificar cifrados débiles
+            for cipher, info in cipher_info.items():
+                if info.get("supported", False):
+                    if "NULL" in cipher:
+                        weak_ciphers.append(cipher)
+                        analysis["ciphers"][cipher] = {
+                            "status": "critical",
+                            "message": f"{cipher} está habilitado (sin cifrado)"
+                        }
+                    elif "RC4" in cipher:
+                        weak_ciphers.append(cipher)
+                        analysis["ciphers"][cipher] = {
+                            "status": "critical",
+                            "message": f"{cipher} está habilitado (RC4 es inseguro)"
+                        }
+                    elif "DES" in cipher or "3DES" in cipher:
+                        weak_ciphers.append(cipher)
+                        analysis["ciphers"][cipher] = {
+                            "status": "critical",
+                            "message": f"{cipher} está habilitado (DES/3DES es inseguro)"
+                        }
+                    elif "CBC" in cipher:
+                        analysis["ciphers"][cipher] = {
+                            "status": "warning",
+                            "message": f"{cipher} está habilitado (modo CBC es vulnerable a ataques de padding)"
+                        }
+
+            if weak_ciphers:
+                analysis["recommendations"].append(
+                    f"Deshabilitar los cifrados débiles: {', '.join(weak_ciphers)}")
+
+        # Analizar vulnerabilidades
+        if "error" not in vulnerability_info:
+            for vuln_name, vuln_info in vulnerability_info.items():
+                if vuln_info.get("vulnerable", False):
+                    analysis["vulnerabilities"][vuln_name] = {
+                        "status": "critical",
+                        "message": vuln_info.get("description", f"Vulnerable a {vuln_name}"),
+                        "details": vuln_info.get("details", "")
+                    }
+                    analysis["recommendations"].append(
+                        f"Corregir la vulnerabilidad {vuln_name}")
+
+        # Calcular calificación general
+        critical_issues = sum(1 for category in [analysis["certificate"], analysis["protocols"],
+                                                 analysis["ciphers"], analysis["vulnerabilities"]]
+                              for item in category.values() if item.get("status") == "critical")
+
+        warning_issues = sum(1 for category in [analysis["certificate"], analysis["protocols"],
+                                                analysis["ciphers"], analysis["vulnerabilities"]]
+                             for item in category.values() if item.get("status") == "warning")
+
+        if critical_issues > 0:
+            analysis["overall_rating"] = "F - Inseguro"
+        elif warning_issues > 2:
+            analysis["overall_rating"] = "D - Problemático"
+        elif warning_issues > 0:
+            analysis["overall_rating"] = "C - Aceptable"
+        elif not analysis["protocols"].get("TLSv1.3", {}).get("status") == "excellent":
+            analysis["overall_rating"] = "B - Bueno"
+        else:
+            analysis["overall_rating"] = "A - Excelente"
+
+        return {
+            "certificate": cert_info,
+            "protocols": protocol_info,
+            "ciphers": cipher_info,
+            "vulnerabilities": vulnerability_info,
+            "analysis": analysis
+        }
+
+    except Exception as e:
+        print(f"\n[!] Error al analizar configuración SSL/TLS: {e}")
+        return {"error": f"Error al analizar configuración SSL/TLS: {e}"}
+
+
+def display_ssl_analysis(analysis_results, voice_enabled=True):
+    """
+    Muestra los resultados del análisis SSL/TLS de manera organizada
+
+    Args:
+        analysis_results (dict): Resultados del análisis SSL/TLS
+        voice_enabled (bool): Indica si el asistente de voz está habilitado
+    """
+    try:
+        if "error" in analysis_results:
+            print(
+                f"\n[!] Error en el análisis SSL/TLS: {analysis_results['error']}")
+            return
+
+        analysis = analysis_results.get("analysis", {})
+
+        print(f"\n{'=' * 60}")
+        print(f"RESULTADOS DEL ANÁLISIS SSL/TLS")
+        print(f"{'=' * 60}\n")
+
+        # Mostrar calificación general
+        overall_rating = analysis.get("overall_rating", "No disponible")
+        print(f"Calificación general: {overall_rating}\n")
+
+        # Mostrar información del certificado
+        print(f"{'CERTIFICADO SSL/TLS':=^60}")
+        cert_info = analysis_results.get("certificate", {})
+
+        if "error" in cert_info:
+            print(f"[!] Error al analizar certificado: {cert_info['error']}")
+        else:
+            # Información básica del certificado
+            subject_cn = cert_info.get("subject", {}).get("CN", "Desconocido")
+            issuer_cn = cert_info.get("issuer", {}).get("CN", "Desconocido")
+            valid_from = cert_info.get("not_before", "Desconocido")
+            valid_to = cert_info.get("not_after", "Desconocido")
+            days_to_expire = cert_info.get("days_to_expire", "Desconocido")
+
+            print(f"Emitido para: {subject_cn}")
+            print(f"Emitido por: {issuer_cn}")
+            print(f"Válido desde: {valid_from}")
+            print(f"Válido hasta: {valid_to}")
+            print(f"Días para expirar: {days_to_expire}")
+            print(
+                f"Algoritmo de firma: {cert_info.get('signature_algorithm', 'Desconocido')}")
+            print(
+                f"Tipo de clave: {cert_info.get('public_key_type', 'Desconocido')}")
+            print(
+                f"Tamaño de clave: {cert_info.get('public_key_bits', 'Desconocido')} bits")
+
+            # Mostrar análisis del certificado
+            print("\nAnálisis del certificado:")
+            for aspect, info in analysis.get("certificate", {}).items():
+                status = info.get("status", "")
+                message = info.get("message", "")
+
+                status_symbol = "✓" if status == "good" or status == "excellent" else "✗"
+                print(f"  {status_symbol} {message}")
+
+        # Mostrar información de protocolos
+        print(f"\n{'PROTOCOLOS SSL/TLS':=^60}")
+        protocol_info = analysis_results.get("protocols", {})
+
+        if "error" in protocol_info:
+            print(
+                f"[!] Error al analizar protocolos: {protocol_info['error']}")
+        else:
+            print("Protocolos soportados:")
+            for protocol, info in protocol_info.items():
+                if info.get("supported", False):
+                    print(
+                        f"  - {protocol}: {info.get('version', 'Versión desconocida')}")
+
+            # Mostrar análisis de protocolos
+            print("\nAnálisis de protocolos:")
+            for protocol, info in analysis.get("protocols", {}).items():
+                status = info.get("status", "")
+                message = info.get("message", "")
+
+                status_symbol = "✓" if status == "good" or status == "excellent" else "✗"
+                print(f"  {status_symbol} {message}")
+
+        # Mostrar información de cifrados
+        print(f"\n{'CIFRADOS SSL/TLS':=^60}")
+        cipher_info = analysis_results.get("ciphers", {})
+
+        if "error" in cipher_info:
+            print(f"[!] Error al analizar cifrados: {cipher_info['error']}")
+        else:
+            print("Cifrados soportados:")
+            supported_ciphers = [
+                cipher for cipher, info in cipher_info.items() if info.get("supported", False)]
+
+            if supported_ciphers:
+                for cipher in supported_ciphers:
+                    info = cipher_info[cipher]
+                    print(
+                        f"  - {cipher} ({info.get('bits', 'Desconocido')} bits)")
+            else:
+                print("  No se detectaron cifrados soportados")
+
+            # Mostrar análisis de cifrados
+            print("\nAnálisis de cifrados:")
+            for cipher, info in analysis.get("ciphers", {}).items():
+                status = info.get("status", "")
+                message = info.get("message", "")
+
+                status_symbol = "✓" if status == "good" or status == "excellent" else "✗"
+                print(f"  {status_symbol} {message}")
+
+        # Mostrar información de vulnerabilidades
+        print(f"\n{'VULNERABILIDADES SSL/TLS':=^60}")
+        vuln_info = analysis_results.get("vulnerabilities", {})
+
+        if "error" in vuln_info:
+            print(
+                f"[!] Error al analizar vulnerabilidades: {vuln_info['error']}")
+        else:
+            vulnerabilities_found = False
+
+            for vuln_name, info in vuln_info.items():
+                if info.get("vulnerable", False):
+                    vulnerabilities_found = True
+                    print(f"  [!] {info.get('description', vuln_name)}")
+                    print(
+                        f"      Severidad: {info.get('severity', 'Desconocida')}")
+                    print(
+                        f"      Detalles: {info.get('details', 'No disponibles')}\n")
+
+            if not vulnerabilities_found:
+                print("  No se detectaron vulnerabilidades conocidas")
+
+        # Mostrar recomendaciones
+        print(f"\n{'RECOMENDACIONES':=^60}")
+        recommendations = analysis.get("recommendations", [])
+
+        if recommendations:
+            for i, recommendation in enumerate(recommendations, 1):
+                print(f"  {i}. {recommendation}")
+        else:
+            print("  No hay recomendaciones específicas")
+
+        print(f"\n{'=' * 60}")
+
+    except Exception as e:
+        print(f"\n[!] Error al mostrar resultados del análisis SSL/TLS: {e}")
+
+
+def export_ssl_analysis(analysis_results, target_ip, port):
+    """
+    Exporta los resultados del análisis SSL/TLS a un archivo JSON
+
+    Args:
+        analysis_results (dict): Resultados del análisis SSL/TLS
+        target_ip (str): La dirección IP analizada
+        port (int): El puerto analizado
+
+    Returns:
+        str: Ruta del archivo generado
+    """
+    try:
+        # Crear directorio de resultados si no existe
+        output_dir = "resultados_analisis"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # Generar nombre de archivo con timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{output_dir}/ssl_{target_ip.replace('.', '_')}_{port}_{timestamp}.json"
+
+        # Exportar a JSON
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(analysis_results, f, indent=4)
+
+        print(
+            f"\n[+] Resultados del análisis SSL/TLS exportados a: {filename}")
+        return filename
+
+    except Exception as e:
+        print(f"\n[!] Error al exportar resultados del análisis SSL/TLS: {e}")
+        return None
+
+
+def run_ssl_analysis(target_ip, port):
+    """
+    Ejecuta un análisis completo de SSL/TLS en un servicio
+
+    Args:
+        target_ip (str): La dirección IP del objetivo
+        port (int): El puerto del servicio
+
+    Returns:
+        dict: Resultados completos del análisis
+    """
+    try:
+        print(
+            f"\n[*] Iniciando análisis SSL/TLS completo en {target_ip}:{port}...")
+        print("[*] Este proceso puede tardar varios minutos...\n")
+
+        # Realizar análisis completo
+        results = analyze_ssl_configuration(target_ip, port)
+
+        # Mostrar resultados
+        display_ssl_analysis(results)
+
+        # Exportar resultados
+        export_ssl_analysis(results, target_ip, port)
+
+        return results
+
+    except Exception as e:
+        print(f"\n[!] Error al ejecutar análisis SSL/TLS: {e}")
+        return {"error": f"Error al ejecutar análisis SSL/TLS: {e}"}

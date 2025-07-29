@@ -1,0 +1,15 @@
+{
+    "target": "https://fuzzbladie.com/",
+    "timestamp": "2025-04-24 18:20:23",
+    "tipo_objetivo": "ip",
+    "geolocalizacion": {
+        "ip": "138.199.52.194",
+        "ciudad": "New York City",
+        "region": "New York",
+        "pais": "US",
+        "ubicacion": "40.7143,-74.0060",
+        "organizacion": "AS212238 Datacamp Limited",
+        "codigo_postal": "10001",
+        "zona_horaria": "America/New_York"
+    }
+}

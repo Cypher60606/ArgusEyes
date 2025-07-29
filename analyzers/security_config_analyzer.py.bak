@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+
+import nmap
+import json
+import os
+import re
+import time
+import sys
+from datetime import datetime
+
+# Definiciones de configuraciones seguras recomendadas
+SECURITY_BENCHMARKS = {
+    "ssh": {
+        "port": 22,
+        "secure_configs": [
+            {"name": "Protocol 2",
+                "description": "Usar solo el protocolo SSH versión 2", "severity": "ALTO"},
+            {"name": "PermitRootLogin no",
+                "description": "Deshabilitar login directo como root", "severity": "ALTO"},
+            {"name": "PasswordAuthentication no",
+                "description": "Deshabilitar autenticación por contraseña", "severity": "MEDIO"},
+            {"name": "PubkeyAuthentication yes",
+                "description": "Habilitar autenticación por clave pública", "severity": "ALTO"},
+            {"name": "PermitEmptyPasswords no",
+                "description": "No permitir contraseñas vacías", "severity": "ALTO"},
+            {"name": "X11Forwarding no",
+                "description": "Deshabilitar reenvío X11", "severity": "MEDIO"},
+            {"name": "MaxAuthTries 4",
+                "description": "Limitar intentos de autenticación", "severity": "MEDIO"},
+            {"name": "ClientAliveInterval 300",
+                "description": "Configurar tiempo de inactividad", "severity": "BAJO"},
+            {"name": "ClientAliveCountMax 0",
+                "description": "Desconectar después de tiempo de inactividad", "severity": "BAJO"}
+        ]
+    },
+    "http": {
+        "port": 80,
+        "secure_configs": [
+            {"name": "X-Frame-Options",
+                "description": "Protección contra ataques de clickjacking", "severity": "MEDIO"},
+            {"name": "X-Content-Type-Options",
+                "description": "Prevenir MIME-sniffing", "severity": "MEDIO"},
+            {"name": "Content-Security-Policy",
+                "description": "Mitigar XSS y otras vulnerabilidades", "severity": "ALTO"},
+            {"name": "Strict-Transport-Security",
+                "description": "Forzar conexiones HTTPS", "severity": "ALTO"},
+            {"name": "X-XSS-Protection",
+                "description": "Protección contra XSS", "severity": "MEDIO"},
+            {"name": "Referrer-Policy",
+                "description": "Controlar información del referrer", "severity": "BAJO"}
+        ]
+    },
+    "https": {
+        "port": 443,
+        "secure_configs": [
+            {"name": "TLS 1.2+", "description": "Usar TLS 1.2 o superior",
+                "severity": "ALTO"},
+            {"name": "Cifrados seguros",
+                "description": "Usar solo cifrados fuertes", "severity": "ALTO"},
+            {"name": "OCSP Stapling",
+                "description": "Implementar OCSP Stapling", "severity": "MEDIO"},
+            {"name": "HTTP/2", "description": "Usar HTTP/2 para mejor rendimiento y seguridad",
+                "severity": "BAJO"},
+            {"name": "Certificado válido",
+                "description": "Certificado no expirado y válido", "severity": "ALTO"}
+        ]
+    },
+    "ftp": {
+        "port": 21,
+        "secure_configs": [
+            {"name": "FTP sobre SSL/TLS",
+                "description": "Usar FTPS en lugar de FTP", "severity": "ALTO"},
+            {"name": "Autenticación anónima deshabilitada",
+                "description": "No permitir acceso anónimo", "severity": "ALTO"},
+            {"name": "Limitar intentos de login",
+                "description": "Bloquear después de múltiples intentos fallidos", "severity": "MEDIO"}
+        ]
+    },
+    "smtp": {
+        "port": 25,
+        "secure_configs": [
+            {"name": "STARTTLS", "description": "Habilitar STARTTLS para cifrado",
+                "severity": "ALTO"},
+            {"name": "SPF", "description": "Implementar Sender Policy Framework",
+                "severity": "MEDIO"},
+            {"name": "DKIM", "description": "Implementar DomainKeys Identified Mail",
+                "severity": "MEDIO"},
+            {"name": "DMARC", "description": "Implementar Domain-based Message Authentication",
+                "severity": "MEDIO"},
+            {"name": "Relay abierto deshabilitado",
+                "description": "Prevenir relay abierto", "severity": "ALTO"}
+        ]
+    },
+    "dns": {
+        "port": 53,
+        "secure_configs": [
+            {"name": "DNSSEC", "description": "Implementar DNSSEC", "severity": "ALTO"},
+            {"name": "Transferencias de zona restringidas",
+                "description": "Limitar transferencias de zona", "severity": "ALTO"},
+            {"name": "Recursión limitada",
+                "description": "Limitar recursión a clientes autorizados", "severity": "ALTO"}
+        ]
+    },
+    "mysql": {
+        "port": 3306,
+        "secure_configs": [
+            {"name": "Acceso remoto restringido",
+                "description": "Limitar acceso remoto", "severity": "ALTO"},
+            {"name": "Autenticación por contraseña segura",
+                "description": "Usar plugin de autenticación seguro", "severity": "ALTO"},
+            {"name": "SSL/TLS habilitado",
+                "description": "Cifrar conexiones con SSL/TLS", "severity": "ALTO"}
+        ]
+    },
+    "rdp": {
+        "port": 3389,
+        "secure_configs": [
+            {"name": "NLA habilitado",
+                "description": "Usar Network Level Authentication", "severity": "ALTO"},
+            {"name": "TLS 1.2+", "description": "Usar TLS 1.2 o superior",
+                "severity": "ALTO"},
+            {"name": "Bloqueo de cuenta",
+                "description": "Bloquear después de intentos fallidos", "severity": "MEDIO"}
+        ]
+    }
+}
+
+
+def analyze_security_config(target_ip, voice_enabled=True):
+    """
+    Analiza las configuraciones de seguridad de los servicios detectados
+
+    Args:
+        target_ip (str): La dirección IP a analizar
+        voice_enabled (bool): Indica si el asistente de voz está habilitado
+
+    Returns:
+        dict: Resultados del análisis de configuraciones
+    """
+    try:
+        from port_scanner import speak_text
+
+        print(
+            f"\n[*] Iniciando análisis de configuraciones de seguridad en {target_ip}...")
+        print("[*] Este proceso puede tardar varios minutos...\n")
+
+        # Anunciar inicio de análisis con voz
+        speak_text(
+            f"Iniciando análisis de configuraciones de seguridad en {target_ip}", voice_enabled)
+
+        # Inicializar el escáner nmap
+        nm = nmap.PortScanner()
+
+        # Argumentos para detección de servicios y sus configuraciones
+        arguments = "-sV -sC -T4 -Pn --script=banner,ssh-auth-methods,ssl-enum-ciphers,http-security-headers,ftp-anon"
+
+        print(f"[*] Ejecutando: nmap {arguments} {target_ip}")
+        start_time = time.time()
+        speak_text(
+            "Analizando servicios y sus configuraciones de seguridad. Este proceso puede tardar varios minutos.", voice_enabled)
+
+        # Ejecutar el escaneo
+        nm.scan(target_ip, arguments=arguments)
+
+        # Calcular tiempo de escaneo
+        scan_duration = time.time() - start_time
+        nm._scan_duration = scan_duration
+
+        # Verificar si hay hosts detectados
+        if not nm.all_hosts():
+            print(f"\n[!] No se pudo detectar el host {target_ip}.")
+            return None
+
+        # Analizar configuraciones de seguridad por servicio
+        security_analysis = {
+            "target_ip": target_ip,
+            "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "duration": scan_duration,
+            "services": []
+        }
+
+        # Procesar cada servicio detectado
+        for proto in nm[target_ip].all_protocols():
+            for port in nm[target_ip][proto]:
+                service_info = nm[target_ip][proto][port]
+                service_name = service_info.get('name', 'unknown').lower()
+
+                # Crear objeto de servicio
+                service = {
+                    "port": port,
+                    "protocol": proto,
+                    "service": service_name,
+                    "product": service_info.get('product', 'unknown'),
+                    "version": service_info.get('version', 'unknown'),
+                    "configurations": [],
+                    "security_issues": [],
+                    "recommendations": []
+                }
+
+                # Analizar configuraciones específicas según el servicio
+                if service_name in SECURITY_BENCHMARKS:
+                    benchmark = SECURITY_BENCHMARKS[service_name]
+
+                    # Analizar scripts de nmap para extraer configuraciones
+                    if 'script' in service_info:
+                        for script_name, output in service_info['script'].items():
+                            service["configurations"].append({
+                                "name": script_name,
+                                "output": output
+                            })
+
+                            # Analizar configuraciones específicas por servicio
+                            analyze_service_config(
+                                service, script_name, output, benchmark)
+
+                    # Si no hay scripts, añadir recomendaciones generales
+                    if not service["configurations"]:
+                        for config in benchmark["secure_configs"]:
+                            service["recommendations"].append({
+                                "name": config["name"],
+                                "description": config["description"],
+                                "severity": config["severity"]
+                            })
+
+                # Añadir el servicio al análisis
+                security_analysis["services"].append(service)
+
+        # Guardar resultados
+        save_security_analysis(security_analysis, target_ip)
+
+        return security_analysis
+
+    except Exception as e:
+        print(f"\n[!] Error al realizar el análisis de configuraciones: {e}")
+        return None
+
+
+def analyze_service_config(service, script_name, output, benchmark):
+    """
+    Analiza la configuración de un servicio específico
+
+    Args:
+        service (dict): Información del servicio
+        script_name (str): Nombre del script de nmap
+        output (str): Salida del script
+        benchmark (dict): Configuraciones recomendadas para el servicio
+    """
+    service_name = service["service"]
+
+    # Análisis específico por tipo de servicio
+    if service_name == "ssh":
+        analyze_ssh_config(service, output, benchmark)
+    elif service_name in ["http", "https"]:
+        analyze_http_config(service, script_name, output, benchmark)
+    elif service_name == "ftp":
+        analyze_ftp_config(service, output, benchmark)
+    elif service_name == "smtp":
+        analyze_smtp_config(service, output, benchmark)
+    elif service_name == "mysql":
+        analyze_mysql_config(service, output, benchmark)
+    elif service_name == "rdp":
+        analyze_rdp_config(service, output, benchmark)
+
+
+def analyze_ssh_config(service, output, benchmark):
+    """
+    Analiza configuraciones de seguridad SSH
+    """
+    # Verificar versión del protocolo
+    if "SSH protocol version" in output:
+        if "1.99" in output or "1." in output:
+            service["security_issues"].append({
+                "name": "Protocolo SSH inseguro",
+                "description": "Se está utilizando SSH versión 1 o compatible, que es inseguro",
+                "severity": "ALTO"
+            })
+
+    # Verificar métodos de autenticación
+    if "ssh-auth-methods" in output:
+        if "publickey" not in output:
+            service["security_issues"].append({
+                "name": "Autenticación por clave pública no disponible",
+                "description": "No se permite autenticación por clave pública, que es más segura",
+                "severity": "MEDIO"
+            })
+        if "password" in output:
+            service["security_issues"].append({
+                "name": "Autenticación por contraseña habilitada",
+                "description": "La autenticación por contraseña está habilitada, lo que es menos seguro",
+                "severity": "MEDIO"
+            })
+
+
+def analyze_http_config(service, script_name, output, benchmark):
+    """
+    Analiza configuraciones de seguridad HTTP/HTTPS
+    """
+    if "http-security-headers" in script_name:
+        # Verificar cabeceras de seguridad
+        missing_headers = []
+        for config in benchmark["secure_configs"]:
+            header_name = config["name"]
+            if header_name not in output:
+                missing_headers.append(config)
+
+        for header in missing_headers:
+            service["security_issues"].append({
+                "name": f"Falta cabecera {header['name']}",
+                "description": header["description"],
+                "severity": header["severity"]
+            })
+
+    # Para HTTPS, verificar TLS y cifrados
+    if service["service"] == "https" and "ssl-enum-ciphers" in script_name:
+        if "TLSv1.0" in output or "SSLv3" in output or "SSLv2" in output:
+            service["security_issues"].append({
+                "name": "Protocolos TLS/SSL obsoletos",
+                "description": "Se están utilizando protocolos TLS/SSL obsoletos e inseguros",
+                "severity": "ALTO"
+            })
+
+        # Verificar cifrados débiles
+        weak_ciphers = ["RC4", "DES", "3DES", "MD5", "NULL"]
+        for cipher in weak_ciphers:
+            if cipher in output:
+                service["security_issues"].append({
+                    "name": "Cifrados débiles",
+                    "description": f"Se están utilizando cifrados débiles ({cipher})",
+                    "severity": "ALTO"
+                })
+                break
+
+
+def analyze_ftp_config(service, output, benchmark):
+    """
+    Analiza configuraciones de seguridad FTP
+    """
+    # Verificar FTP anónimo
+    if "ftp-anon" in output and "Anonymous FTP login allowed" in output:
+        service["security_issues"].append({
+            "name": "FTP anónimo habilitado",
+            "description": "Se permite el acceso FTP anónimo, lo que es un riesgo de seguridad",
+            "severity": "ALTO"
+        })
+
+    # Verificar si es FTP sin cifrar
+    if "TLS" not in output and "SSL" not in output:
+        service["security_issues"].append({
+            "name": "FTP sin cifrar",
+            "description": "Se está utilizando FTP sin cifrado (no FTPS)",
+            "severity": "ALTO"
+        })
+
+
+def analyze_smtp_config(service, output, benchmark):
+    """
+    Analiza configuraciones de seguridad SMTP
+    """
+    # Verificar STARTTLS
+    if "STARTTLS" not in output:
+        service["security_issues"].append({
+            "name": "STARTTLS no disponible",
+            "description": "El servidor SMTP no ofrece STARTTLS para cifrado",
+            "severity": "ALTO"
+        })
+
+    # Verificar relay abierto (si hay script específico)
+    if "smtp-open-relay" in output and "Server is an open relay" in output:
+        service["security_issues"].append({
+            "name": "Relay SMTP abierto",
+            "description": "El servidor SMTP permite relay abierto, lo que puede ser usado para spam",
+            "severity": "ALTO"
+        })
+
+
+def analyze_mysql_config(service, output, benchmark):
+    """
+    Analiza configuraciones de seguridad MySQL
+    """
+    # Verificar si acepta conexiones remotas sin restricciones
+    if "Access denied for user" not in output and "authentication plugin" in output:
+        service["security_issues"].append({
+            "name": "Posible acceso MySQL sin restricciones",
+            "description": "El servidor MySQL podría permitir conexiones remotas sin restricciones adecuadas",
+            "severity": "ALTO"
+        })
+
+
+def analyze_rdp_config(service, output, benchmark):
+    """
+    Analiza configuraciones de seguridad RDP
+    """
+    # Verificar NLA
+    if "rdp-enum-encryption" in output and "CredSSP (NLA)" not in output:
+        service["security_issues"].append({
+            "name": "NLA no habilitado",
+            "description": "Network Level Authentication no está habilitado, lo que reduce la seguridad",
+            "severity": "ALTO"
+        })
+
+    # Verificar cifrado
+    if "rdp-enum-encryption" in output and "128-bit" not in output:
+        service["security_issues"].append({
+            "name": "Cifrado RDP débil",
+            "description": "El servidor RDP no utiliza cifrado fuerte (128-bit)",
+            "severity": "ALTO"
+        })
+
+
+def save_security_analysis(analysis, target_ip):
+    """
+    Guarda los resultados del análisis de seguridad en un archivo JSON
+
+    Args:
+        analysis (dict): Resultados del análisis
+        target_ip (str): IP analizada
+    """
+    # Crear directorio si no existe
+    output_dir = os.path.join(os.path.dirname(
+        os.path.abspath(__file__)), "resultados_analisis")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Generar nombre de archivo con timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"security_config_{target_ip.replace('.', '_')}_{timestamp}.json"
+    filepath = os.path.join(output_dir, filename)
+
+    # Guardar resultados
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(analysis, f, indent=4, ensure_ascii=False)
+
+    print(f"\n[+] Resultados guardados en: {filepath}")
+    return filepath
+
+
+def display_security_analysis(analysis, target_ip, voice_enabled=True):
+    """
+    Muestra los resultados del análisis de configuraciones de seguridad
+
+    Args:
+        analysis (dict): Resultados del análisis
+        target_ip (str): La dirección IP analizada
+        voice_enabled (bool): Indica si el asistente de voz está habilitado
+    """
+    from port_scanner import speak_text
+
+    if analysis is None:
+        print(
+            "\n[!] No se pudo completar el análisis de configuraciones de seguridad.")
+        return
+
+    print(f"\n{'=' * 60}")
+    print(f"RESULTADOS DEL ANÁLISIS DE CONFIGURACIONES PARA: {target_ip}")
+    print(f"{'=' * 60}\n")
+
+    # Mostrar duración del análisis
+    duration = analysis.get('duration', 0)
+    minutes, seconds = divmod(duration, 60)
+    print(
+        f"Duración del análisis: {int(minutes)} minutos y {seconds:.2f} segundos\n")
+
+    # Resumen de servicios analizados
+    services = analysis.get('services', [])
+    print(f"Servicios analizados: {len(services)}")
+
+    # Contar problemas de seguridad por severidad
+    total_issues = 0
+    severity_counts = {"ALTO": 0, "MEDIO": 0, "BAJO": 0}
+
+    for service in services:
+        issues = service.get('security_issues', [])
+        total_issues += len(issues)
+        for issue in issues:
+            severity = issue.get('severity', 'BAJO')
+            severity_counts[severity] += 1
+
+    print(f"Problemas de seguridad encontrados: {total_issues}")
+    print(f"  - Severidad ALTA: {severity_counts['ALTO']}")
+    print(f"  - Severidad MEDIA: {severity_counts['MEDIO']}")
+    print(f"  - Severidad BAJA: {severity_counts['BAJO']}\n")
+
+    # Anunciar resumen con voz
+    speak_text(
+        f"Se han analizado {len(services)} servicios y se han encontrado {total_issues} problemas de seguridad. "
+        f"{severity_counts['ALTO']} de severidad alta, {severity_counts['MEDIO']} de severidad media y "
+        f"{severity_counts['BAJO']} de severidad baja.",
+        voice_enabled
+    )
+
+    # Mostrar detalles por servicio
+    print("DETALLES POR SERVICIO:\n")
+
+    for service in services:
+        port = service.get('port', 'N/A')
+        protocol = service.get('protocol', 'N/A')
+        service_name = service.get('service', 'desconocido')
+        product = service.get('product', 'desconocido')
+        version = service.get('version', 'desconocida')
+
+        print(f"{'=' * 40}")
+        print(f"Puerto {port}/{protocol} - {service_name.upper()}")
+        print(f"Producto: {product} {version}")
+
+        # Mostrar problemas de seguridad
+        issues = service.get('security_issues', [])
+        if issues:
+            print("\nProblemas de seguridad detectados:")
+            for i, issue in enumerate(issues, 1):
+                name = issue.get('name', 'Problema desconocido')
+                description = issue.get('description', 'Sin descripción')
+                severity = issue.get('severity', 'BAJO')
+                print(f"  {i}. [{severity}] {name}")
+                print(f"     {description}")
+        else:
+            print("\nNo se detectaron problemas de seguridad específicos.")
+
+        # Mostrar recomendaciones
+        recommendations = service.get('recommendations', [])
+        if recommendations:
+            print("\nRecomendaciones:")
+            for i, rec in enumerate(recommendations, 1):
+                name = rec.get('name', 'Recomendación desconocida')
+                description = rec.get('description', 'Sin descripción')
+                print(f"  {i}. {name}")
+                print(f"     {description}")
+
+        print("")
+
+    # Conclusión final
+    print("\nCONCLUSIÓN:")
+    conclusion_message = ""
+
+    if total_issues == 0:
+        message = "No se detectaron problemas de configuración específicos en los servicios analizados."
+        print(f"[+] {message}")
+        conclusion_message = message
+    else:
+        if severity_counts['ALTO'] > 0:
+            message = f"Se encontraron {severity_counts['ALTO']} problemas de seguridad de alta severidad que requieren atención inmediata."
+            print(f"[!] {message}")
+            conclusion_message = message
+        elif severity_counts['MEDIO'] > 0:
+            message = f"Se encontraron {severity_counts['MEDIO']} problemas de seguridad de severidad media que deberían ser revisados."
+            print(f"[!] {message}")
+            conclusion_message = message
+        else:
+            message = f"Se encontraron {severity_counts['BAJO']} problemas de seguridad de baja severidad."
+            print(f"[!] {message}")
+            conclusion_message = message
+
+    # Anunciar conclusión con voz
+    speak_text(conclusion_message, voice_enabled)
+
+
+# Función principal para ejecutar el análisis desde línea de comandos
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        target_ip = sys.argv[1]
+        analysis = analyze_security_config(target_ip)
+        display_security_analysis(analysis, target_ip)
+    else:
+        print("Uso: python security_config_analyzer.py <dirección_ip>")

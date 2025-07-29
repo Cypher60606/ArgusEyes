@@ -1,0 +1,121 @@
+# Escáner de Puertos y Vulnerabilidades con Asistente de Voz
+
+Este proyecto proporciona un conjunto de herramientas para realizar análisis de seguridad en redes y sistemas, incluyendo escaneo de puertos, detección de servicios, análisis de vulnerabilidades y más. Incluye un asistente de voz que proporciona información audible sobre los resultados del escaneo.
+
+## Características
+
+- **Escaneo de puertos y servicios**: Detección de puertos abiertos y servicios en ejecución
+- **Análisis de vulnerabilidades**: Identificación de posibles vulnerabilidades en servicios
+- **Detección de dispositivos IoT**: Identificación y análisis de dispositivos IoT en la red
+- **Análisis SSL/TLS**: Evaluación de la seguridad de configuraciones SSL/TLS
+- **Fuzzing web**: Descubrimiento de directorios y archivos ocultos en servidores web
+- **Recolección OSINT**: Obtención de información de fuentes abiertas
+- **Asistente de voz**: Proporciona información audible sobre los resultados
+
+## Estructura del Proyecto
+
+```
+.
+├── analyzers/              # Módulos de análisis
+│   ├── security_config_analyzer.py   # Análisis de configuraciones de seguridad
+│   ├── ssl_analyzer.py               # Análisis de certificados SSL/TLS
+│   └── vulnerability_correlation.py  # Correlación de vulnerabilidades
+├── scanners/               # Módulos de escaneo
+│   ├── exploit_integration.py        # Integración con bases de datos de exploits
+│   ├── fuzzing_module.py             # Fuzzing de aplicaciones web
+│   ├── iot_scanner.py                # Escaneo de dispositivos IoT
+│   ├── osint_module.py               # Recolección de información OSINT
+│   ├── port_scanner.py               # Escaneo de puertos básico
+│   └── web_vulnerability_scanner.py  # Escaneo de vulnerabilidades web
+├── utils/                  # Utilidades compartidas
+│   └── voice_utils.py                # Funciones para el asistente de voz
+├── reports/                # Plantillas de informes
+├── resultados_analisis/    # Resultados de análisis guardados
+├── resultados_escaneo/     # Resultados de escaneos guardados
+├── resultados_fuzzing/     # Resultados de fuzzing guardados
+├── main.py                 # Punto de entrada principal
+└── requirements.txt        # Dependencias del proyecto
+```
+
+## Requisitos
+
+- Python 3.6 o superior
+- Nmap instalado en el sistema
+- Bibliotecas Python (ver requirements.txt)
+
+## Instalación
+
+1. Instala Nmap en tu sistema:
+   - Windows: Descarga e instala desde [nmap.org](https://nmap.org/download.html)
+   - Linux: `sudo apt install nmap` (Debian/Ubuntu) o `sudo yum install nmap` (CentOS/RHEL)
+   - macOS: `brew install nmap` (usando Homebrew)
+
+2. Clona este repositorio:
+   ```
+   git clone https://github.com/tu-usuario/scanner-nmap.git
+   cd scanner-nmap
+   ```
+
+3. Instala las dependencias de Python:
+   ```
+   pip install -r requirements.txt
+   ```
+
+## Uso
+
+### Uso básico
+
+```
+python main.py <dirección_ip>
+```
+
+### Opciones disponibles
+
+```
+python main.py <dirección_ip> [opciones]
+
+Opciones:
+  -t, --type {default,rapido,completo,iot,web,osint}
+                        Tipo de escaneo a realizar
+  -v, --voice           Habilitar asistente de voz
+  -o, --output ARCHIVO  Guardar resultados en archivo
+  --iot                 Realizar escaneo específico de dispositivos IoT
+  --fuzzing             Realizar fuzzing de directorios y archivos web
+  --osint               Realizar recolección de información OSINT
+```
+
+### Ejemplos
+
+- Escaneo básico:
+  ```
+  python main.py 192.168.1.1
+  ```
+
+- Escaneo completo con asistente de voz:
+  ```
+  python main.py 192.168.1.1 -t completo -v
+  ```
+
+- Escaneo de dispositivos IoT:
+  ```
+  python main.py 192.168.1.1 --iot
+  ```
+
+- Fuzzing web y guardar resultados:
+  ```
+  python main.py example.com --fuzzing -o resultados.json
+  ```
+
+## Contribuir
+
+Las contribuciones son bienvenidas. Por favor, sigue estos pasos:
+
+1. Haz un fork del repositorio
+2. Crea una rama para tu característica (`git checkout -b feature/nueva-caracteristica`)
+3. Haz commit de tus cambios (`git commit -am 'Añadir nueva característica'`)
+4. Haz push a la rama (`git push origin feature/nueva-caracteristica`)
+5. Crea un nuevo Pull Request
+
+## Licencia
+
+Este proyecto está licenciado bajo la Licencia MIT - ver el archivo LICENSE para más detalles.

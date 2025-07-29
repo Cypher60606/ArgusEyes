@@ -1,0 +1,577 @@
+#!/usr/bin/env python3
+
+import nmap
+import json
+import re
+import os
+import sys
+import time
+from datetime import datetime
+
+# Diccionario de dispositivos IoT comunes y sus características
+IOT_DEVICES = {
+    "camaras": {
+        "puertos": [80, 443, 554, 1935, 8000, 8080, 8443, 9000],
+        "servicios": ["rtsp", "http", "https", "hikvision", "dahua", "axis", "onvif"],
+        "fabricantes": ["Hikvision", "Dahua", "Axis", "Foscam", "Nest", "Ring", "Arlo", "Wyze"]
+    },
+    "routers": {
+        "puertos": [80, 443, 22, 23, 53, 8080, 8443],
+        "servicios": ["http", "https", "ssh", "telnet", "dns"],
+        "fabricantes": ["Cisco", "Linksys", "TP-Link", "D-Link", "Netgear", "Huawei", "MikroTik"]
+    },
+    "termostatos": {
+        "puertos": [80, 443, 8080, 1883, 8883],
+        "servicios": ["http", "https", "mqtt"],
+        "fabricantes": ["Nest", "Ecobee", "Honeywell", "Emerson"]
+    },
+    "asistentes_voz": {
+        "puertos": [80, 443, 8080, 1883, 8883],
+        "servicios": ["http", "https", "mqtt"],
+        "fabricantes": ["Amazon", "Google", "Apple", "Microsoft"]
+    },
+    "bombillas": {
+        "puertos": [80, 443, 1883, 8883, 5683, 5684],
+        "servicios": ["http", "https", "mqtt", "coap"],
+        "fabricantes": ["Philips Hue", "LIFX", "TP-Link", "Wyze", "Sengled"]
+    },
+    "cerraduras": {
+        "puertos": [80, 443, 1883, 8883, 5683, 5684],
+        "servicios": ["http", "https", "mqtt", "coap", "zwave", "zigbee"],
+        "fabricantes": ["August", "Schlage", "Yale", "Kwikset", "Lockly"]
+    },
+    "electrodomesticos": {
+        "puertos": [80, 443, 1883, 8883],
+        "servicios": ["http", "https", "mqtt"],
+        "fabricantes": ["Samsung", "LG", "Whirlpool", "GE", "Bosch"]
+    }
+}
+
+# Vulnerabilidades comunes en dispositivos IoT
+IOT_VULNERABILITIES = {
+    "default_credentials": {
+        "descripcion": "Credenciales por defecto no cambiadas",
+        "impacto": "Alto",
+        "mitigacion": "Cambiar las credenciales por defecto por unas fuertes y únicas"
+    },
+    "firmware_outdated": {
+        "descripcion": "Firmware desactualizado con vulnerabilidades conocidas",
+        "impacto": "Alto",
+        "mitigacion": "Actualizar el firmware a la última versión disponible"
+    },
+    "open_telnet": {
+        "descripcion": "Puerto Telnet abierto y accesible",
+        "impacto": "Alto",
+        "mitigacion": "Deshabilitar Telnet y usar SSH con autenticación por clave"
+    },
+    "weak_encryption": {
+        "descripcion": "Cifrado débil o inexistente en las comunicaciones",
+        "impacto": "Alto",
+        "mitigacion": "Habilitar cifrado fuerte (TLS 1.2+) y deshabilitar protocolos obsoletos"
+    },
+    "upnp_enabled": {
+        "descripcion": "UPnP habilitado y expuesto a Internet",
+        "impacto": "Medio",
+        "mitigacion": "Deshabilitar UPnP o limitar su acceso solo a la red local"
+    },
+    "insecure_web_interface": {
+        "descripcion": "Interfaz web con vulnerabilidades (XSS, CSRF, etc.)",
+        "impacto": "Medio",
+        "mitigacion": "Actualizar firmware o aplicar parches de seguridad"
+    },
+    "no_updates": {
+        "descripcion": "Dispositivo sin soporte de actualizaciones",
+        "impacto": "Medio",
+        "mitigacion": "Considerar reemplazar el dispositivo por uno con soporte activo"
+    },
+    "data_exposure": {
+        "descripcion": "Exposición de datos sensibles sin cifrar",
+        "impacto": "Alto",
+        "mitigacion": "Habilitar cifrado para datos en reposo y en tránsito"
+    }
+}
+
+
+def scan_iot_devices(target_ip, scan_type='default', voice_enabled=True):
+    """
+    Escanea una dirección IP para detectar dispositivos IoT, sus servicios y posibles vulnerabilidades
+
+    Args:
+        target_ip (str): La dirección IP a escanear
+        scan_type (str): Tipo de escaneo a realizar
+        voice_enabled (bool): Indica si el asistente de voz está habilitado
+
+    Returns:
+        dict: Resultados del escaneo de dispositivos IoT
+    """
+    try:
+        from port_scanner import speak_text
+
+        # Inicializar el escáner nmap
+        nm = nmap.PortScanner()
+
+        print(f"\n[*] Iniciando escaneo de dispositivos IoT en {target_ip}...")
+        print("[*] Este proceso puede tardar varios minutos...\n")
+
+        # Anunciar inicio de escaneo con voz
+        speak_text(
+            f"Iniciando escaneo de dispositivos IoT en la dirección IP {target_ip}", voice_enabled)
+
+        # Definir argumentos según el tipo de escaneo
+        scan_args = {
+            'default': '-sS -sV -sC -Pn -p 80,443,22,23,1883,8883,5683,5684,8080,8443,554,1935,9000 --open',
+            'completo': '-sS -sV -sC -Pn -p- --open',
+            'rapido': '-T4 -F -Pn --open',
+            'vulnerabilidades': '-sS -sV -Pn --script vuln --open -p 80,443,22,23,1883,8883,5683,5684,8080,8443,554,1935,9000'
+        }
+
+        # Anunciar tipo de escaneo con voz
+        speak_text(
+            f"Configurando escaneo IoT de tipo {scan_type}", voice_enabled)
+
+        # Usar los argumentos correspondientes al tipo de escaneo
+        arguments = scan_args.get(scan_type, scan_args['default'])
+
+        print(f"[*] Tipo de escaneo IoT: {scan_type.upper()}")
+        print(f"[*] Argumentos: {arguments}\n")
+
+        # Iniciar temporizador
+        start_time = time.time()
+
+        # Realizar el escaneo
+        print(f"[*] Ejecutando: nmap {arguments} {target_ip}")
+        speak_text(
+            f"Escaneando puertos comunes de dispositivos IoT en el objetivo. Este proceso puede tardar varios minutos.", voice_enabled)
+
+        # Iniciar el escaneo
+        nm.scan(target_ip, arguments=arguments)
+
+        # Calcular tiempo de escaneo
+        scan_duration = time.time() - start_time
+        nm._scan_duration = scan_duration  # Guardar duración en el objeto nm
+
+        # Anunciar finalización del escaneo
+        speak_text(
+            "Escaneo de dispositivos IoT completado. Procesando resultados.", voice_enabled)
+
+        return nm
+
+    except nmap.PortScannerError as e:
+        print(f"\n[!] Error al realizar el escaneo: {e}")
+        print(
+            "[!] Asegúrate de tener instalado nmap y ejecutar el script con permisos adecuados.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n[!] Error inesperado: {e}")
+        sys.exit(1)
+
+
+def identify_iot_devices(scan_results, target_ip):
+    """
+    Identifica posibles dispositivos IoT basados en los resultados del escaneo
+
+    Args:
+        scan_results (PortScanner): Objeto con los resultados del escaneo
+        target_ip (str): La dirección IP escaneada
+
+    Returns:
+        dict: Dispositivos IoT identificados y sus características
+    """
+    try:
+        # Verificar si hay hosts detectados
+        if target_ip not in scan_results.all_hosts():
+            print(f"\n[!] No se encontró información para la IP {target_ip}")
+            return {}
+
+        # Inicializar resultados
+        iot_devices = {
+            "detected_devices": [],
+            "open_ports": [],
+            "services": [],
+            "possible_vulnerabilities": []
+        }
+
+        # Recopilar puertos abiertos y servicios
+        for proto in scan_results[target_ip].all_protocols():
+            for port in scan_results[target_ip][proto]:
+                port_info = scan_results[target_ip][proto][port]
+                if port_info['state'] == 'open':
+                    # Añadir puerto a la lista de puertos abiertos
+                    iot_devices["open_ports"].append({
+                        "port": port,
+                        "protocol": proto,
+                        "service": port_info.get('name', 'desconocido'),
+                        "version": port_info.get('product', 'desconocido') + " " + port_info.get('version', '')
+                    })
+
+                    # Añadir servicio a la lista de servicios
+                    if port_info.get('name') and port_info.get('name') not in [s.get('name') for s in iot_devices["services"]]:
+                        iot_devices["services"].append({
+                            "name": port_info.get('name', 'desconocido'),
+                            "product": port_info.get('product', 'desconocido'),
+                            "version": port_info.get('version', '')
+                        })
+
+        # Identificar posibles dispositivos IoT basados en puertos y servicios
+        for device_type, characteristics in IOT_DEVICES.items():
+            # Verificar coincidencias de puertos
+            matching_ports = [p for p in iot_devices["open_ports"]
+                              if p["port"] in characteristics["puertos"]]
+
+            # Verificar coincidencias de servicios
+            matching_services = [s for s in iot_devices["services"]
+                                 if s["name"] in characteristics["servicios"] or
+                                 any(fab.lower() in (s["product"] or '').lower() for fab in characteristics["fabricantes"])]
+
+            # Si hay coincidencias significativas, añadir a dispositivos detectados
+            confidence = 0
+            if matching_ports:
+                confidence += len(matching_ports) / \
+                    len(characteristics["puertos"]) * 50
+            if matching_services:
+                confidence += len(matching_services) / \
+                    len(characteristics["servicios"]) * 50
+
+            if confidence > 30:  # Umbral de confianza del 30%
+                iot_devices["detected_devices"].append({
+                    "type": device_type,
+                    "confidence": round(confidence, 2),
+                    "matching_ports": [p["port"] for p in matching_ports],
+                    "matching_services": [s["name"] for s in matching_services],
+                    "possible_manufacturers": [fab for fab in characteristics["fabricantes"]
+                                               if any(fab.lower() in (s.get("product") or '').lower() for s in iot_devices["services"])]
+                })
+
+        # Identificar posibles vulnerabilidades
+        identify_iot_vulnerabilities(scan_results, target_ip, iot_devices)
+
+        return iot_devices
+
+    except Exception as e:
+        print(f"\n[!] Error al identificar dispositivos IoT: {e}")
+        return {}
+
+
+def identify_iot_vulnerabilities(scan_results, target_ip, iot_devices):
+    """
+    Identifica posibles vulnerabilidades en dispositivos IoT
+
+    Args:
+        scan_results (PortScanner): Objeto con los resultados del escaneo
+        target_ip (str): La dirección IP escaneada
+        iot_devices (dict): Diccionario con información de dispositivos IoT
+
+    Returns:
+        None: Modifica el diccionario iot_devices añadiendo vulnerabilidades
+    """
+    try:
+        # Verificar telnet abierto (puerto 23)
+        if any(p["port"] == 23 and p["service"] == "telnet" for p in iot_devices["open_ports"]):
+            iot_devices["possible_vulnerabilities"].append({
+                "name": "open_telnet",
+                "description": IOT_VULNERABILITIES["open_telnet"]["descripcion"],
+                "impact": IOT_VULNERABILITIES["open_telnet"]["impacto"],
+                "mitigation": IOT_VULNERABILITIES["open_telnet"]["mitigacion"]
+            })
+
+        # Verificar UPnP habilitado (puerto 1900)
+        if any(p["port"] == 1900 for p in iot_devices["open_ports"]):
+            iot_devices["possible_vulnerabilities"].append({
+                "name": "upnp_enabled",
+                "description": IOT_VULNERABILITIES["upnp_enabled"]["descripcion"],
+                "impact": IOT_VULNERABILITIES["upnp_enabled"]["impacto"],
+                "mitigation": IOT_VULNERABILITIES["upnp_enabled"]["mitigacion"]
+            })
+
+        # Verificar interfaces web inseguras (puertos 80, 8080, etc.)
+        web_ports = [80, 8080, 8000, 8888, 9000]
+        if any(p["port"] in web_ports and p["protocol"] == "tcp" for p in iot_devices["open_ports"]):
+            # Verificar si hay resultados de scripts de vulnerabilidades
+            for port in web_ports:
+                if port in scan_results[target_ip].get('tcp', {}) and 'script' in scan_results[target_ip]['tcp'][port]:
+                    scripts = scan_results[target_ip]['tcp'][port]['script']
+                    if any(vuln_term in script_name.lower() for script_name in scripts.keys() for vuln_term in ['vuln', 'xss', 'sql', 'injection', 'csrf']):
+                        iot_devices["possible_vulnerabilities"].append({
+                            "name": "insecure_web_interface",
+                            "description": IOT_VULNERABILITIES["insecure_web_interface"]["descripcion"],
+                            "impact": IOT_VULNERABILITIES["insecure_web_interface"]["impacto"],
+                            "mitigation": IOT_VULNERABILITIES["insecure_web_interface"]["mitigacion"],
+                            "details": "Vulnerabilidades detectadas en la interfaz web"
+                        })
+                        break
+
+        # Verificar cifrado débil en servicios SSL/TLS
+        ssl_ports = [443, 8443, 9443]
+        if any(p["port"] in ssl_ports for p in iot_devices["open_ports"]):
+            for port in ssl_ports:
+                if port in scan_results[target_ip].get('tcp', {}) and 'script' in scan_results[target_ip]['tcp'][port]:
+                    scripts = scan_results[target_ip]['tcp'][port]['script']
+                    if any(weak_term in script_output.lower() for script_name, script_output in scripts.items()
+                           for weak_term in ['weak', 'vulnerable', 'deprecated', 'insecure', 'sslv2', 'sslv3', 'tlsv1.0']):
+                        iot_devices["possible_vulnerabilities"].append({
+                            "name": "weak_encryption",
+                            "description": IOT_VULNERABILITIES["weak_encryption"]["descripcion"],
+                            "impact": IOT_VULNERABILITIES["weak_encryption"]["impacto"],
+                            "mitigation": IOT_VULNERABILITIES["weak_encryption"]["mitigacion"],
+                            "details": "Protocolos o cifrados débiles detectados"
+                        })
+                        break
+
+        # Verificar posibles credenciales por defecto
+        if any(p["port"] in [21, 22, 23, 80, 443, 8080, 8443] for p in iot_devices["open_ports"]):
+            # Esta es una heurística simple; en un escenario real se necesitaría probar las credenciales
+            iot_devices["possible_vulnerabilities"].append({
+                "name": "default_credentials",
+                "description": IOT_VULNERABILITIES["default_credentials"]["descripcion"],
+                "impact": IOT_VULNERABILITIES["default_credentials"]["impacto"],
+                "mitigation": IOT_VULNERABILITIES["default_credentials"]["mitigacion"],
+                "details": "Posibles credenciales por defecto en servicios expuestos"
+            })
+
+    except Exception as e:
+        print(f"\n[!] Error al identificar vulnerabilidades IoT: {e}")
+
+
+def display_iot_results(iot_devices, target_ip, voice_enabled=True):
+    """
+    Muestra los resultados del análisis de dispositivos IoT
+
+    Args:
+        iot_devices (dict): Diccionario con información de dispositivos IoT
+        target_ip (str): La dirección IP analizada
+        voice_enabled (bool): Indica si el asistente de voz está habilitado
+    """
+    try:
+        from port_scanner import speak_text
+
+        if not iot_devices or not iot_devices.get("detected_devices"):
+            message = f"No se detectaron dispositivos IoT en la dirección IP {target_ip}"
+            print(f"\n[!] {message}")
+            speak_text(message, voice_enabled)
+            return
+
+        print(f"\n{'=' * 60}")
+        print(f"RESULTADOS DEL ANÁLISIS DE DISPOSITIVOS IOT PARA: {target_ip}")
+        print(f"{'=' * 60}\n")
+
+        # Anunciar con voz el resultado general
+        detected_count = len(iot_devices.get("detected_devices", []))
+        vuln_count = len(iot_devices.get("possible_vulnerabilities", []))
+
+        speak_text(
+            f"Se han detectado {detected_count} posibles dispositivos IoT en la dirección IP {target_ip}. "
+            f"Se identificaron {vuln_count} posibles vulnerabilidades.",
+            voice_enabled
+        )
+
+        # Mostrar dispositivos detectados
+        print("DISPOSITIVOS IOT DETECTADOS:")
+        print(f"{'-' * 60}")
+
+        for device in iot_devices.get("detected_devices", []):
+            print(f"Tipo: {device['type'].upper()}")
+            print(f"Nivel de confianza: {device['confidence']}%")
+            print(
+                f"Puertos coincidentes: {', '.join(map(str, device['matching_ports']))}")
+            print(
+                f"Servicios coincidentes: {', '.join(device['matching_services'])}")
+
+            if device.get("possible_manufacturers"):
+                print(
+                    f"Posibles fabricantes: {', '.join(device['possible_manufacturers'])}")
+            print(f"{'-' * 60}")
+
+        # Mostrar vulnerabilidades detectadas
+        if iot_devices.get("possible_vulnerabilities"):
+            print("\nVULNERABILIDADES DETECTADAS:")
+            print(f"{'-' * 60}")
+
+            for vuln in iot_devices.get("possible_vulnerabilities", []):
+                print(f"Vulnerabilidad: {vuln['name']}")
+                print(f"Descripción: {vuln['description']}")
+                print(f"Impacto: {vuln['impact']}")
+                print(f"Mitigación: {vuln['mitigation']}")
+                if vuln.get("details"):
+                    print(f"Detalles: {vuln['details']}")
+                print(f"{'-' * 60}")
+
+        # Mostrar recomendaciones generales
+        print("\nRECOMENDACIONES GENERALES DE SEGURIDAD:")
+        print(f"{'-' * 60}")
+        print("1. Cambiar todas las contraseñas por defecto por unas fuertes y únicas")
+        print("2. Actualizar el firmware de todos los dispositivos a la última versión disponible")
+        print("3. Deshabilitar servicios innecesarios (Telnet, UPnP expuesto a Internet, etc.)")
+        print("4. Segmentar la red para aislar los dispositivos IoT del resto de la red")
+        print("5. Implementar monitorización de tráfico para detectar comportamientos anómalos")
+        print("6. Configurar correctamente los firewalls para limitar el acceso a los dispositivos")
+        print("7. Verificar regularmente si hay actualizaciones de seguridad disponibles")
+
+    except Exception as e:
+        print(f"\n[!] Error al mostrar resultados de dispositivos IoT: {e}")
+
+
+def export_iot_results(iot_devices, target_ip, export_format='json'):
+    """
+    Exporta los resultados del análisis de dispositivos IoT a un archivo
+
+    Args:
+        iot_devices (dict): Diccionario con información de dispositivos IoT
+        target_ip (str): La dirección IP analizada
+        export_format (str): Formato de exportación ('json', 'txt')
+
+    Returns:
+        str: Ruta del archivo generado
+    """
+    try:
+        # Crear directorio de resultados si no existe
+        output_dir = "resultados_analisis"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # Generar nombre de archivo con timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{output_dir}/iot_analisis_{target_ip.replace('.', '_')}_{timestamp}"
+
+        if export_format.lower() == 'json':
+            # Exportar a JSON
+            file_path = f"{filename}.json"
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(iot_devices, f, indent=4, ensure_ascii=False)
+
+        elif export_format.lower() == 'txt':
+            # Exportar a TXT (formato legible)
+            file_path = f"{filename}.txt"
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    f"RESULTADOS DEL ANÁLISIS DE DISPOSITIVOS IOT PARA: {target_ip}\n")
+                f.write(f"{'=' * 60}\n\n")
+                f.write(
+                    f"Fecha y hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+                # Escribir dispositivos detectados
+                f.write("DISPOSITIVOS IOT DETECTADOS:\n")
+                f.write(f"{'-' * 60}\n")
+
+                for device in iot_devices.get("detected_devices", []):
+                    f.write(f"Tipo: {device['type'].upper()}\n")
+                    f.write(f"Nivel de confianza: {device['confidence']}%\n")
+                    f.write(
+                        f"Puertos coincidentes: {', '.join(map(str, device['matching_ports']))}\n")
+                    f.write(
+                        f"Servicios coincidentes: {', '.join(device['matching_services'])}\n")
+
+                    if device.get("possible_manufacturers"):
+                        f.write(
+                            f"Posibles fabricantes: {', '.join(device['possible_manufacturers'])}\n")
+                    f.write(f"{'-' * 60}\n")
+
+                # Escribir vulnerabilidades detectadas
+                if iot_devices.get("possible_vulnerabilities"):
+                    f.write("\nVULNERABILIDADES DETECTADAS:\n")
+                    f.write(f"{'-' * 60}\n")
+
+                    for vuln in iot_devices.get("possible_vulnerabilities", []):
+                        f.write(f"Vulnerabilidad: {vuln['name']}\n")
+                        f.write(f"Descripción: {vuln['description']}\n")
+                        f.write(f"Impacto: {vuln['impact']}\n")
+                        f.write(f"Mitigación: {vuln['mitigation']}\n")
+                        if vuln.get("details"):
+                            f.write(f"Detalles: {vuln['details']}\n")
+                        f.write(f"{'-' * 60}\n")
+
+                # Escribir recomendaciones generales
+                f.write("\nRECOMENDACIONES GENERALES DE SEGURIDAD:\n")
+                f.write(f"{'-' * 60}\n")
+                f.write(
+                    "1. Cambiar todas las contraseñas por defecto por unas fuertes y únicas\n")
+                f.write(
+                    "2. Actualizar el firmware de todos los dispositivos a la última versión disponible\n")
+                f.write(
+                    "3. Deshabilitar servicios innecesarios (Telnet, UPnP expuesto a Internet, etc.)\n")
+                f.write(
+                    "4. Segmentar la red para aislar los dispositivos IoT del resto de la red\n")
+                f.write(
+                    "5. Implementar monitorización de tráfico para detectar comportamientos anómalos\n")
+                f.write(
+                    "6. Configurar correctamente los firewalls para limitar el acceso a los dispositivos\n")
+                f.write(
+                    "7. Verificar regularmente si hay actualizaciones de seguridad disponibles\n")
+
+        else:
+            print(
+                f"[!] Formato de exportación '{export_format}' no soportado.")
+            return None
+
+        print(f"\n[+] Resultados exportados a: {file_path}")
+        return file_path
+
+    except Exception as e:
+        print(f"\n[!] Error al exportar resultados: {e}")
+        return None
+
+
+def run_iot_scan(target_ip, scan_type='default', voice_enabled=True, analyze_attack_chains=True):
+    """
+    Ejecuta un escaneo completo de dispositivos IoT
+
+    Args:
+        target_ip (str): La dirección IP a escanear
+        scan_type (str): Tipo de escaneo a realizar
+        voice_enabled (bool): Indica si el asistente de voz está habilitado
+        analyze_attack_chains (bool): Indica si se debe realizar análisis de cadenas de ataque
+
+    Returns:
+        dict: Resultados del análisis de dispositivos IoT
+    """
+    try:
+        # Realizar escaneo de puertos y servicios
+        scan_results = scan_iot_devices(target_ip, scan_type, voice_enabled)
+
+        # Identificar dispositivos IoT
+        iot_devices = identify_iot_devices(scan_results, target_ip)
+
+        # Mostrar resultados
+        display_iot_results(iot_devices, target_ip, voice_enabled)
+
+        # Exportar resultados
+        export_option = input(
+            "\n¿Deseas exportar los resultados? (json/txt/n) [json]: ").strip().lower() or "json"
+        if export_option in ["json", "txt"]:
+            export_path = export_iot_results(
+                iot_devices, target_ip, export_option)
+            from port_scanner import speak_text
+            speak_text(
+                "Análisis de dispositivos IoT completado. Los resultados han sido mostrados en pantalla y exportados.", voice_enabled)
+        else:
+            from port_scanner import speak_text
+            speak_text(
+                "Análisis de dispositivos IoT completado. Los resultados han sido mostrados en pantalla.", voice_enabled)
+
+        # Analizar cadenas de ataque si está habilitado y se encontraron vulnerabilidades
+        if analyze_attack_chains and iot_devices.get("possible_vulnerabilities"):
+            print("\n[*] Iniciando análisis de cadenas de ataque potenciales...")
+            speak_text(
+                "Iniciando análisis de cadenas de ataque potenciales basadas en las vulnerabilidades detectadas.", voice_enabled)
+
+            # Importar el módulo de correlación de vulnerabilidades
+            try:
+                from analyzers.vulnerability_correlation import analyze_attack_vectors
+                # Realizar análisis de cadenas de ataque
+                attack_chains = analyze_attack_vectors(
+                    iot_devices, target_ip, voice_enabled)
+                # Añadir resultados de cadenas de ataque al diccionario de resultados
+                iot_devices["attack_chains"] = attack_chains
+            except ImportError as e:
+                print(
+                    f"\n[!] Error al importar el módulo de correlación de vulnerabilidades: {e}")
+                print(
+                    "[!] Asegúrate de que el módulo existe en la carpeta 'analyzers'")
+            except Exception as e:
+                print(f"\n[!] Error al analizar cadenas de ataque: {e}")
+
+        print("\n===== ANÁLISIS DE DISPOSITIVOS IOT COMPLETADO =====\n")
+        return iot_devices
+
+    except Exception as e:
+        print(f"\n[!] Error al ejecutar el análisis de dispositivos IoT: {e}")
+        return {}

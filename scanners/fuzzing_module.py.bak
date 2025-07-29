@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+
+import requests
+import time
+import os
+import json
+from datetime import datetime
+import concurrent.futures
+import random
+import re
+
+# Lista de agentes de usuario para rotar y evitar bloqueos
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36 Edg/92.0.902.55"
+]
+
+# Extensiones comunes para archivos
+COMMON_EXTENSIONS = [
+    "", ".html", ".php", ".asp", ".aspx", ".jsp", ".js", ".txt", ".pdf", ".zip",
+    ".bak", ".old", ".backup", ".config", ".conf", ".db", ".sql", ".xml", ".log",
+    ".tar", ".tar.gz", ".rar", ".7z", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"
+]
+
+# Diccionarios incorporados para fuzzing
+BASIC_WORDLISTS = {
+    "directories": [
+        "admin", "administrator", "backup", "backups", "css", "data", "db", "debug", "dev",
+        "files", "images", "img", "js", "log", "logs", "old", "panel", "private", "scripts",
+        "secret", "secrets", "secure", "security", "temp", "test", "tests", "upload", "uploads",
+        "user", "users", "web", "www", "api", "config", "dashboard", "login", "wp-admin",
+        "wp-content", "wp-includes", "administrator", "phpmyadmin", "mysql", "webmail",
+        "mail", "cpanel", "ftp", "ssh", "webdav", "backup-files", "database", "db-backup",
+        "staging", "development", "beta", "hidden", "internal", "intranet", "extranet"
+    ],
+    "files": [
+        "index", "home", "default", "admin", "login", "register", "password", "reset",
+        "config", "settings", "setup", "install", "backup", "db", "database", "log",
+        "logs", "error", "debug", "test", "phpinfo", "info", "about", "robots", "sitemap",
+        "readme", "license", "changelog", "history", "version", "api", "feed", "rss",
+        "dashboard", "admin_login", "administrator", "wp-login", "wp-config", ".htaccess",
+        "web.config", "server-status", "server-info", "status", "stats", "statistics",
+        "users", "accounts", "members", "profile", "user", "admin-panel", "adminpanel"
+    ]
+}
+
+
+def get_random_user_agent():
+    """Devuelve un agente de usuario aleatorio de la lista"""
+    return random.choice(USER_AGENTS)
+
+
+def load_wordlist(wordlist_type, custom_wordlist=None):
+    """Carga una lista de palabras para fuzzing
+
+    Args:
+        wordlist_type (str): Tipo de lista ('directories' o 'files')
+        custom_wordlist (str): Ruta a un archivo de lista personalizada (opcional)
+
+    Returns:
+        list: Lista de palabras para fuzzing
+    """
+    if custom_wordlist and os.path.exists(custom_wordlist):
+        try:
+            with open(custom_wordlist, 'r', encoding='utf-8', errors='ignore') as f:
+                return [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            print(f"[!] Error al cargar la lista personalizada: {e}")
+
+    # Usar lista incorporada si no hay personalizada o hubo error
+    return BASIC_WORDLISTS.get(wordlist_type, [])
+
+
+def check_url(url, timeout=5, verify_ssl=True):
+    """Comprueba si una URL existe y devuelve su código de estado
+
+    Args:
+        url (str): URL a comprobar
+        timeout (int): Tiempo de espera para la solicitud
+        verify_ssl (bool): Verificar certificados SSL
+
+    Returns:
+        tuple: (existe, código_estado, tamaño_respuesta, tiempo_respuesta)
+    """
+    try:
+        headers = {"User-Agent": get_random_user_agent()}
+        start_time = time.time()
+        response = requests.head(
+            url, timeout=timeout, headers=headers, verify=verify_ssl, allow_redirects=True)
+
+        # Si HEAD no funciona, intentar con GET
+        if response.status_code == 405:  # Método no permitido
+            response = requests.get(
+                url, timeout=timeout, headers=headers, verify=verify_ssl, allow_redirects=True)
+
+        response_time = time.time() - start_time
+
+        # Obtener tamaño de la respuesta
+        content_length = int(response.headers.get('Content-Length', 0))
+
+        # Considerar exitoso si el código es 200, 201, 202, 203, 204, 301, 302, 307, 308
+        success_codes = [200, 201, 202, 203, 204, 301, 302, 307, 308]
+        exists = response.status_code in success_codes
+
+        return (exists, response.status_code, content_length, response_time)
+
+    except requests.exceptions.RequestException as e:
+        return (False, 0, 0, 0)
+
+
+def fuzz_target(target_url, wordlist, extensions=None, directory_mode=False,
+                max_threads=10, delay=0.1, timeout=5, verify_ssl=True):
+    """Realiza fuzzing en una URL objetivo
+
+    Args:
+        target_url (str): URL base para el fuzzing
+        wordlist (list): Lista de palabras para probar
+        extensions (list): Lista de extensiones para probar
+        directory_mode (bool): Si es True, añade '/' al final de las URLs
+        max_threads (int): Número máximo de hilos concurrentes
+        delay (float): Retraso entre solicitudes
+        timeout (int): Tiempo de espera para las solicitudes
+        verify_ssl (bool): Verificar certificados SSL
+
+    Returns:
+        list: Lista de resultados encontrados
+    """
+    # Normalizar URL base
+    if not target_url.endswith('/'):
+        target_url += '/'
+
+    if not target_url.startswith(('http://', 'https://')):
+        target_url = 'http://' + target_url
+
+    # Usar extensiones predeterminadas si no se proporcionan
+    if extensions is None:
+        extensions = COMMON_EXTENSIONS if not directory_mode else [""]
+
+    # Preparar lista de URLs para probar
+    urls_to_check = []
+    for word in wordlist:
+        if directory_mode:
+            # En modo directorio, añadir / al final
+            urls_to_check.append((f"{target_url}{word}/", word, ""))
+        else:
+            # En modo archivo, probar con diferentes extensiones
+            for ext in extensions:
+                urls_to_check.append((f"{target_url}{word}{ext}", word, ext))
+
+    print(f"\n[*] Iniciando fuzzing en {target_url}")
+    print(f"[*] Objetivo: {'directorios' if directory_mode else 'archivos'}")
+    print(f"[*] Total de rutas a probar: {len(urls_to_check)}")
+    print(f"[*] Hilos concurrentes: {max_threads}")
+    print(f"[*] Retraso entre solicitudes: {delay} segundos")
+    print("[*] Iniciando escaneo...\n")
+
+    # Resultados
+    results = []
+    found_count = 0
+
+    # Función para procesar cada URL
+    def process_url(url_data):
+        nonlocal found_count
+        url, word, ext = url_data
+
+        # Añadir retraso para evitar sobrecarga del servidor
+        time.sleep(delay)
+
+        exists, status_code, content_length, response_time = check_url(
+            url, timeout, verify_ssl)
+
+        if exists:
+            found_count += 1
+            result = {
+                "url": url,
+                "word": word,
+                "extension": ext,
+                "status_code": status_code,
+                "content_length": content_length,
+                "response_time": response_time
+            }
+            print(
+                f"[+] Encontrado: {url} (Código: {status_code}, Tamaño: {content_length} bytes)")
+            return result
+        return None
+
+    # Usar ThreadPoolExecutor para paralelizar las solicitudes
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
+        futures = [executor.submit(process_url, url_data)
+                   for url_data in urls_to_check]
+
+        # Procesar resultados a medida que se completan
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                results.append(result)
+
+    print(
+        f"\n[*] Fuzzing completado. Se encontraron {found_count} resultados.")
+    return results
+
+
+def export_results(results, target_url, export_format='json'):
+    """Exporta los resultados del fuzzing a un archivo
+
+    Args:
+        results (list): Resultados del fuzzing
+        target_url (str): URL objetivo
+        export_format (str): Formato de exportación ('json', 'txt')
+
+    Returns:
+        str: Ruta del archivo generado
+    """
+    try:
+        # Crear directorio de resultados si no existe
+        output_dir = "resultados_fuzzing"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # Generar nombre de archivo con timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target_safe = re.sub(r'[^\w]', '_', target_url)
+        filename = f"{output_dir}/fuzzing_{target_safe}_{timestamp}"
+
+        if export_format.lower() == 'json':
+            # Exportar a JSON
+            file_path = f"{filename}.json"
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "target": target_url,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "results": results,
+                    "total_found": len(results)
+                }, f, indent=4)
+
+        elif export_format.lower() == 'txt':
+            # Exportar a TXT (formato legible)
+            file_path = f"{filename}.txt"
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(f"RESULTADOS DE FUZZING PARA: {target_url}\n")
+                f.write(
+                    f"Fecha y hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Total de resultados: {len(results)}\n\n")
+
+                f.write(
+                    f"{'URL':<60}{'CÓDIGO':<10}{'TAMAÑO':<15}{'TIEMPO (s)':<10}\n")
+                f.write("-" * 95 + "\n")
+
+                for result in results:
+                    f.write(
+                        f"{result['url']:<60}{result['status_code']:<10}{result['content_length']:<15}{result['response_time']:.4f}\n")
+
+        else:
+            print(
+                f"[!] Formato de exportación '{export_format}' no soportado.")
+            return None
+
+        print(f"\n[+] Resultados exportados a: {file_path}")
+        return file_path
+
+    except Exception as e:
+        print(f"\n[!] Error al exportar resultados: {e}")
+        return None
+
+
+def run_fuzzing(target_url, mode='both', custom_wordlist=None, extensions=None,
+                max_threads=10, delay=0.1, timeout=5, verify_ssl=True):
+    """Ejecuta un análisis de fuzzing completo
+
+    Args:
+        target_url (str): URL objetivo
+        mode (str): Modo de fuzzing ('directories', 'files', 'both')
+        custom_wordlist (str): Ruta a un archivo de lista personalizada
+        extensions (list): Lista de extensiones para probar
+        max_threads (int): Número máximo de hilos concurrentes
+        delay (float): Retraso entre solicitudes
+        timeout (int): Tiempo de espera para las solicitudes
+        verify_ssl (bool): Verificar certificados SSL
+
+    Returns:
+        dict: Resultados del fuzzing
+    """
+    results = {
+        "target": target_url,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "directories": [],
+        "files": []
+    }
+
+    print(f"\n{'=' * 60}")
+    print(f"INICIANDO ANÁLISIS DE FUZZING PARA: {target_url}")
+    print(f"{'=' * 60}\n")
+
+    # Fuzzing de directorios
+    if mode in ['directories', 'both']:
+        print("\n[*] Iniciando fuzzing de directorios...")
+        dir_wordlist = load_wordlist('directories', custom_wordlist)
+        dir_results = fuzz_target(
+            target_url,
+            dir_wordlist,
+            directory_mode=True,
+            max_threads=max_threads,
+            delay=delay,
+            timeout=timeout,
+            verify_ssl=verify_ssl
+        )
+        results["directories"] = dir_results
+
+    # Fuzzing de archivos
+    if mode in ['files', 'both']:
+        print("\n[*] Iniciando fuzzing de archivos...")
+        file_wordlist = load_wordlist('files', custom_wordlist)
+        file_results = fuzz_target(
+            target_url,
+            file_wordlist,
+            extensions=extensions,
+            directory_mode=False,
+            max_threads=max_threads,
+            delay=delay,
+            timeout=timeout,
+            verify_ssl=verify_ssl
+        )
+        results["files"] = file_results
+
+    # Guardar resultados en un archivo JSON
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target_safe = re.sub(r'[^\w]', '_', target_url)
+
+    # Asegurarse de que el directorio de resultados existe
+    results_dir = "resultados_fuzzing"
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Guardar el archivo de resultados
+    results_file = os.path.join(
+        results_dir, f"fuzzing_{target_safe}_{timestamp}.json")
+    with open(results_file, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=4, ensure_ascii=False)
+
+    print(
+        f"\n[+] Análisis de fuzzing completado. Resultados guardados en: {results_file}")
+
+    return results
+
+
+def display_fuzzing_results(results):
+    """Muestra los resultados del análisis de fuzzing de manera formateada
+
+    Args:
+        results (dict): Resultados del análisis de fuzzing
+    """
+    print(f"\n{'=' * 60}")
+    print(f"RESULTADOS DEL ANÁLISIS DE FUZZING PARA: {results['target']}")
+    print(f"Fecha y hora: {results['timestamp']}")
+    print(f"{'=' * 60}\n")
+
+    # Mostrar directorios encontrados
+    print(f"\n{'-' * 60}")
+    print("DIRECTORIOS ENCONTRADOS")
+    print(f"{'-' * 60}")
+
+    directories = results.get('directories', [])
+    if not directories:
+        print("[!] No se encontraron directorios.")
+    else:
+        print(f"{'URL':<60}{'CÓDIGO':<10}{'TAMAÑO':<15}{'TIEMPO (s)':<10}")
+        print("-" * 95)
+        for dir_result in directories:
+            print(
+                f"{dir_result['url']:<60}{dir_result['status_code']:<10}{dir_result['content_length']:<15}{dir_result['response_time']:.4f}")
+
+    # Mostrar archivos encontrados
+    print(f"\n{'-' * 60}")
+    print("ARCHIVOS ENCONTRADOS")
+    print(f"{'-' * 60}")
+
+    files = results.get('files', [])
+    if not files:
+        print("[!] No se encontraron archivos.")
+    else:
+        print(f"{'URL':<60}{'CÓDIGO':<10}{'TAMAÑO':<15}{'TIEMPO (s)':<10}")
+        print("-" * 95)
+        for file_result in files:
+            print(
+                f"{file_result['url']:<60}{file_result['status_code']:<10}{file_result['content_length']:<15}{file_result['response_time']:.4f}")
+
+    # Resumen
+    total_dirs = len(directories)
+    total_files = len(files)
+    total = total_dirs + total_files
+
+    print(f"\n{'-' * 60}")
+    print("RESUMEN")
+    print(f"{'-' * 60}")
+    print(f"Total de directorios encontrados: {total_dirs}")
+    print(f"Total de archivos encontrados: {total_files}")
+    print(f"Total de recursos encontrados: {total}")
+
+    print(f"\n{'=' * 60}")
+    print(f"FIN DEL ANÁLISIS DE FUZZING")
+    print(f"{'=' * 60}\n")
+
+
+# Función principal para ejecutar desde línea de comandos
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='Herramienta de fuzzing para descubrir recursos ocultos')
+    parser.add_argument('target', help='URL objetivo para el fuzzing')
+    parser.add_argument('--mode', choices=['directories', 'files', 'both'], default='both',
+                        help='Modo de fuzzing: directorios, archivos o ambos')
+    parser.add_argument(
+        '--wordlist', help='Ruta a un archivo de lista personalizada')
+    parser.add_argument('--threads', type=int, default=10,
+                        help='Número máximo de hilos concurrentes')
+    parser.add_argument('--delay', type=float, default=0.1,
+                        help='Retraso entre solicitudes (segundos)')
+    parser.add_argument('--timeout', type=int, default=5,
+                        help='Tiempo de espera para las solicitudes (segundos)')
+    parser.add_argument('--no-verify-ssl', action='store_true',
+                        help='No verificar certificados SSL')
+
+    args = parser.parse_args()
+
+    # Ejecutar fuzzing
+    results = run_fuzzing(
+        args.target,
+        mode=args.mode,
+        custom_wordlist=args.wordlist,
+        max_threads=args.threads,
+        delay=args.delay,
+        timeout=args.timeout,
+        verify_ssl=not args.no_verify_ssl
+    )
+
+    # Mostrar resultados
+    display_fuzzing_results(results)
+
+
+if __name__ == "__main__":
+    main()
