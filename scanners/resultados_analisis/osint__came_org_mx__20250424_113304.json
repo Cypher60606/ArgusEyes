@@ -1,8 +1,0 @@
-{
-    "target": "https://came.org.mx/",
-    "timestamp": "2025-04-24 11:30:39",
-    "tipo_objetivo": "ip",
-    "geolocalizacion": {
-        "error": "('Connection aborted.', ConnectionAbortedError(10053, 'Se ha anulado una conexión establecida por el software en su equipo host', None, 10053, None))"
-    }
-}
